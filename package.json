@@ -1,7 +1,7 @@
 {
   "name": "hanasu",
   "version": "1.0.0",
-  "private": true,
+  "private": false,
   "scripts": {
     "dev": "next dev",
     "build": "next build",
@@ -20,7 +20,7 @@
     "react-hot-toast": "^1.0.2",
     "react-markdown": "^5.0.3"
   },
-  "description": "- [Live Demo](https://next.fireship.io/) - [Enroll in the Course](https://fireship.io/courses/react-next-firebase/)",
+  "description": "Thee best social network in the world",
   "main": "next.config.js",
   "directories": {
     "lib": "lib"

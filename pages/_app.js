@@ -1,4 +1,4 @@
-import '@styles/globals.css';
+import '@styles/kawai.css';
 import Navbar from '@components/Navbar';
 import { UserContext } from '@lib/context';
 import { useUserData } from '@lib/hooks';

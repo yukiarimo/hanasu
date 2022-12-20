@@ -1,12 +1,11 @@
 import PostFeed from '@components/PostFeed';
 import Metatags from '@components/Metatags';
-import Loader from '@components/Loader';
 import { firestore, fromMillis, postToJSON } from '@lib/firebase';
 import toast from 'react-hot-toast';
 import { useState } from 'react';
 
 // Max post to query per page
-const LIMIT = 10;
+const LIMIT = 2;
 
 export async function getServerSideProps(context) {
   const postsQuery = firestore
@@ -16,7 +15,6 @@ export async function getServerSideProps(context) {
     .limit(LIMIT);
 
   const posts = (await postsQuery.get()).docs.map(postToJSON);
-  
 
   return {
     props: { posts }, // will be passed to the page component as props
@@ -46,6 +44,7 @@ export default function Home(props) {
     const newPosts = (await query.get()).docs.map((doc) => doc.data());
 
     setPosts(posts.concat(newPosts));
+    toast.success('Posts loaded!');
     setLoading(false);
 
     if (newPosts.length < LIMIT) {
@@ -54,10 +53,10 @@ export default function Home(props) {
   };
 
   return (
-    <main>
+    <div className='block-o'>
       <Metatags title="Home Page" description="Get the latest posts on our site" />
 
-      <div className="card card-info">
+      <div className="block-l">
         <h2>はなす</h2>
         <p>Welcome! Hanasu - is the most popular social network is the world!</p>
         <p>Created by Yuki Arimo</p>
@@ -66,11 +65,8 @@ export default function Home(props) {
       <PostFeed posts={posts} />
 
       {!loading && !postsEnd && <button onClick={getMorePosts}>Next</button>}
-
-      <Loader show={loading} />
-
       {postsEnd && 'Articles finished!'}
-    </main>
+    </div>
     
   );
 }

@@ -1,6 +1,8 @@
 import { auth, firestore, googleAuthProvider } from '@lib/firebase';
+import { signInWithEmailAndPassword } from "firebase/auth";
 import { UserContext } from '@lib/context';
 import Metatags from '@components/Metatags';
+import toast from 'react-hot-toast';
 
 import { useEffect, useState, useCallback, useContext } from 'react';
 import debounce from 'lodash.debounce';
@@ -27,12 +29,17 @@ function SignInButton() {
 
   return (
     <>
-      <button className="btn-google" onClick={signInWithGoogle}>
-        <img src={'/google.png'} width="30px" /> Sign in with Google
-      </button>
-      <button onClick={() => auth.signInAnonymously()}>
-        Sign in Anonymously
-      </button>
+      <div className='block-o'>
+        <div className='collector-lo'>
+          <button className="block-button" onClick={signInWithGoogle}>Login with Google</button>
+        </div>
+        <div className='collector-lo'>
+          <button className="block-button" onClick={toast('Email login not avaliable in your region!')}>Email login</button>
+        </div>
+        <div className='collector-lo'>
+        <button className="block-button" onClick={() => auth.signInAnonymously()}>Sign in Anonymously</button>
+        </div>
+      </div>
     </>
   );
 }
@@ -44,6 +51,7 @@ function SignOutButton() {
 
 // Username form
 function UsernameForm() {
+  toast.success('Login started!');
   const [formValue, setFormValue] = useState('');
   const [isValid, setIsValid] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -112,7 +120,7 @@ function UsernameForm() {
         <form onSubmit={onSubmit}>
           <input name="username" placeholder="myname" value={formValue} onChange={onChange} />
           <UsernameMessage username={formValue} isValid={isValid} loading={loading} />
-          <button type="submit" className="btn-green" disabled={!isValid}>
+          <button type="submit" className="block-button" disabled={!isValid}>
             Choose
           </button>
 
@@ -134,9 +142,9 @@ function UsernameMessage({ username, isValid, loading }) {
   if (loading) {
     return <p>Checking...</p>;
   } else if (isValid) {
-    return <p className="text-success">{username} is available!</p>;
+    return <p className="block-text">{username} is available!</p>;
   } else if (username && !isValid) {
-    return <p className="text-danger">That username is taken!</p>;
+    return <p className="block-text">That username is taken!</p>;
   } else {
     return <p></p>;
   }

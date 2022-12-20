@@ -30,7 +30,7 @@ function PostManager() {
   const [post] = useDocumentDataOnce(postRef);
 
   return (
-    <main className={styles.container}>
+    <main className="block-o">
       {post && (
         <>
           <section>
@@ -44,7 +44,7 @@ function PostManager() {
             <h3>Tools</h3>
             <button onClick={() => setPreview(!preview)}>{preview ? 'Edit' : 'Preview'}</button>
             <Link href={`/${post.username}/${post.slug}`}>
-              <button className="btn-blue">Live view</button>
+              <button className="block-button">Live view</button>
             </Link>
             <DeletePostButton postRef={postRef} />
           </aside>
@@ -74,7 +74,7 @@ function PostForm({ defaultValues, postRef, preview }) {
   return (
     <form onSubmit={handleSubmit(updatePost)}>
       {preview && (
-        <div className="card">
+        <div className="block-l">
           <ReactMarkdown>{watch('content')}</ReactMarkdown>
         </div>
       )}
@@ -98,7 +98,7 @@ function PostForm({ defaultValues, postRef, preview }) {
           <label>Published</label>
         </fieldset>
 
-        <button type="submit" className="btn-green" disabled={!isDirty || !isValid}>
+        <button type="submit" className="block-button" disabled={!isDirty || !isValid}>
           Save Changes
         </button>
       </div>
@@ -110,16 +110,13 @@ function DeletePostButton({ postRef }) {
   const router = useRouter();
 
   const deletePost = async () => {
-    const doIt = confirm('are you sure!');
-    if (doIt) {
       await postRef.delete();
       router.push('/admin');
-      toast('post annihilated ', { icon: '🗑️' });
-    }
+      toast('post deleted ', { icon: '🗑️' });
   };
 
   return (
-    <button className="btn-red" onClick={deletePost}>
+    <button className="block-button" onClick={deletePost}>
       Delete
     </button>
   );

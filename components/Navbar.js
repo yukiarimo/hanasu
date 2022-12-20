@@ -16,42 +16,42 @@ export default function Navbar() {
   }
 
   return (
-    <nav className="navbar">
-      <ul>
-        <li>
+    <nav className="topbar-o">
+      <div className='top-tab-block'>
+        <li className='top-tab-block-e'>
           <Link href="/">
-            <button className="btn-logo">Hanasu</button>
+            <img src='Hanasu.jpeg' style={{width: '30px'}} />
           </Link>
         </li>
 
         {/* user is signed-in and has username */}
         {username && (
           <>
-            <li className="push-left">
+            <div className="top-tab-block-e">
               <button onClick={signOut}>Exit</button>
-            </li>
-            <li>
+            </div>
+            <div className='top-tab-block-e'>
               <Link href="/admin">
                 <button className="btn-blue">Write Posts</button>
               </Link>
-            </li>
-            <li>
+            </div>
+            <div className='top-tab-block-e'>
               <Link href={`/${username}`}>
                 <img src={user?.photoURL || '/hacker.png'} />
               </Link>
-            </li>
+            </div>
           </>
         )}
 
         {/* user is not signed OR has not created username */}
         {!username && (
-          <li>
+          <div className='top-tab-block'>
             <Link href="/enter">
               <button className="btn-blue">Log in</button>
             </Link>
-          </li>
+          </div>
         )}
-      </ul>
+      </div>
     </nav>
   );
 }

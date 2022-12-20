@@ -28,12 +28,15 @@ function PostList() {
   const [querySnapshot] = useCollection(query);
 
   const posts = querySnapshot?.docs.map((doc) => doc.data());
+  toast.success('Your admin page!');
 
   return (
+    <div className='block-l'>
     <>
       <h1>Manage your Posts</h1>
       <PostFeed posts={posts} admin />
     </>
+    </div>
   );
 }
 
@@ -64,7 +67,7 @@ function CreateNewPost() {
       content: '# hello world!',
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
-      heartCount: 0,
+      VoteCount: 0,
     };
 
     await ref.set(data);
@@ -76,17 +79,18 @@ function CreateNewPost() {
   };
 
   return (
-    <form onSubmit={createPost}>
+    
+    <form className='block-form' onSubmit={createPost}>
       <input
         value={title}
         onChange={(e) => setTitle(e.target.value)}
         placeholder="My Awesome Article!"
-        className={styles.input}
+        className="block-input"
       />
       <p>
         <strong>Slug:</strong> {slug}
       </p>
-      <button type="submit" disabled={!isValid} className="btn-green">
+      <button type="submit" disabled={!isValid} className="block-button">
         Create New Post
       </button>
     </form>
