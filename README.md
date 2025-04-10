@@ -91,17 +91,17 @@ hanasu "Text to read" output.wav
 
 **Specify a language:**
 ```bash
-hanasu "Text to read" output.wav --language EN
+hanasu "Text to read" output.wav --speaker EN-US
 ```
 
 **Specify a speaker:**
 ```bash
-hanasu "Text to read" output.wav --language EN --speaker Yuna
+hanasu "Text to read" output.wav --speaker EN-US --speaker Yuna
 ```
 
 **Specify a speed:**
 ```bash
-hanasu "Text to read" output.wav --language EN --speaker Yuna --speed 1.5
+hanasu "Text to read" output.wav --speaker EN-US --speaker Yuna --speed 1.5
 ```
 
 **Load from a file:**
