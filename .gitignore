@@ -5,5 +5,5 @@ build/
 *.zip
 *.wav
 hanasu/configs/Yuna/*
-hanasuconverter/dataset/*
-tests/*
+hanasu/monotonic_align/core.c
+hanasu/monotonic_align/monotonic_align/core.cpython-310-darwin.so

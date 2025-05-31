@@ -1,6 +1,7 @@
 import torch
 from torch.nn import functional as F
 import numpy as np
+
 DEFAULT_MIN_BIN_WIDTH = 1e-3
 DEFAULT_MIN_BIN_HEIGHT = 1e-3
 DEFAULT_MIN_DERIVATIVE = 1e-3

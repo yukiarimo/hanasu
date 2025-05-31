@@ -2,16 +2,167 @@ import os
 import random
 import torch
 import torch.utils.data
-from tqdm import tqdm
-from loguru import logger
-from mel_processing import spectrogram_torch, mel_spectrogram_torch
-from utils import load_filepaths_and_text
-from utils import load_wav_to_torch_librosa as load_wav_to_torch
-from text import cleaned_text_to_sequence
-from hanasu.llama_utils import get_llama_feature
-from text.cleaner import clean_text
+from mel_processing import (mel_spectrogram_torch)
+from text import text_to_sequence
+from utils import load_filepaths_and_text, load_wav_to_torch
 
-"""Multi speaker version with stereo audio support"""
+def get_text(text):
+    text_norm = text_to_sequence(text)
+    # else not cleaned text before -> text_norm = text_to_sequence(text)
+    text_norm = torch.LongTensor(text_norm)
+    return text_norm
+
+class TextAudioLoader(torch.utils.data.Dataset):
+    """
+    1) loads audio, text pairs
+    2) normalizes text and converts them to sequences of integers
+    3) computes spectrograms from audio files.
+    """
+
+    def __init__(self, audiopaths_and_text, hparams):
+        self.hparams = hparams
+        self.audiopaths_and_text = load_filepaths_and_text(audiopaths_and_text)
+        self.max_wav_value = hparams.max_wav_value
+        self.sampling_rate = hparams.sampling_rate
+        self.filter_length = hparams.filter_length
+        self.hop_length = hparams.hop_length
+        self.win_length = hparams.win_length
+        self.sampling_rate = hparams.sampling_rate
+        self.n_mel_channels = getattr(hparams, "n_mel_channels", 128)
+        self.min_text_len = getattr(hparams, "min_text_len", 1)
+        self.max_text_len = getattr(hparams, "max_text_len", 190)
+
+        random.seed(1234)
+        random.shuffle(self.audiopaths_and_text)
+        self._filter()
+
+    def _filter(self):
+        """
+        Filter text & store spec lengths
+        """
+        # Store spectrogram lengths for Bucketing
+        # wav_length ~= file_size / (wav_channels * Bytes per dim) = file_size / (1 * 2)
+        # spec_length = wav_length // hop_length
+
+        audiopaths_and_text_new = []
+        lengths = []
+        for audiopath, text in self.audiopaths_and_text:
+            if self.min_text_len <= len(text) and len(text) <= self.max_text_len:
+                audiopaths_and_text_new.append([audiopath, text])
+                lengths.append(os.path.getsize(audiopath) // (2 * self.hop_length))
+        self.audiopaths_and_text = audiopaths_and_text_new
+        self.lengths = lengths
+
+    def get_audio_text_pair(self, audiopath_and_text):
+        # separate filename and text
+        audiopath, text = audiopath_and_text[0], audiopath_and_text[1]
+        text = get_text(text)
+        spec, wav = self.get_audio(audiopath)
+        return (text, spec, wav)
+
+    def get_audio(self, filename):
+        # TODO : if linear spec exists convert to mel from existing linear spec
+        audio, sampling_rate = load_wav_to_torch(filename)
+        if sampling_rate != self.sampling_rate:
+            raise ValueError(
+                "{} {} SR doesn't match target {} SR".format(
+                    sampling_rate, self.sampling_rate
+                )
+            )
+        audio_norm = audio / self.max_wav_value
+        audio_norm = audio_norm.unsqueeze(0)
+        spec_filename = filename.replace(".wav", ".spec.pt")
+        spec_filename = spec_filename.replace(".spec.pt", ".mel.pt")
+        if os.path.exists(spec_filename):
+            spec = torch.load(spec_filename)
+        else:
+            spec = mel_spectrogram_torch(
+                    audio_norm,
+                    self.filter_length,
+                    self.n_mel_channels,
+                    self.sampling_rate,
+                    self.hop_length,
+                    self.win_length,
+                    self.hparams.mel_fmin,
+                    self.hparams.mel_fmax,
+                    center=False,
+            )
+            spec = torch.squeeze(spec, 0)
+            torch.save(spec, spec_filename)
+        return spec, audio_norm
+
+    def __getitem__(self, index):
+        return self.get_audio_text_pair(self.audiopaths_and_text[index])
+
+    def __len__(self):
+        return len(self.audiopaths_and_text)
+
+class TextAudioCollate:
+    """Zero-pads model inputs and targets"""
+
+    def __init__(self, return_ids=False):
+        self.return_ids = return_ids
+
+    def __call__(self, batch):
+        """Collate's training batch from normalized text and aduio
+        PARAMS
+        ------
+        batch: [text_normalized, spec_normalized, wav_normalized]
+        """
+        # Right zero-pad all one-hot text sequences to max input length
+        _, ids_sorted_decreasing = torch.sort(
+            torch.LongTensor([x[1].size(1) for x in batch]), dim=0, descending=True
+        )
+
+        max_text_len = max([len(x[0]) for x in batch])
+        max_spec_len = max([x[1].size(1) for x in batch])
+        max_wav_len = max([x[2].size(1) for x in batch])
+
+        text_lengths = torch.LongTensor(len(batch))
+        spec_lengths = torch.LongTensor(len(batch))
+        wav_lengths = torch.LongTensor(len(batch))
+
+        text_padded = torch.LongTensor(len(batch), max_text_len)
+        spec_padded = torch.FloatTensor(len(batch), batch[0][1].size(0), max_spec_len)
+        wav_padded = torch.FloatTensor(len(batch), 1, max_wav_len)
+        text_padded.zero_()
+        spec_padded.zero_()
+        wav_padded.zero_()
+        for i in range(len(ids_sorted_decreasing)):
+            row = batch[ids_sorted_decreasing[i]]
+
+            text = row[0]
+            text_padded[i, : text.size(0)] = text
+            text_lengths[i] = text.size(0)
+
+            spec = row[1]
+            spec_padded[i, :, : spec.size(1)] = spec
+            spec_lengths[i] = spec.size(1)
+
+            wav = row[2]
+            wav_padded[i, :, : wav.size(1)] = wav
+            wav_lengths[i] = wav.size(1)
+
+        if self.return_ids:
+            return (
+                text_padded,
+                text_lengths,
+                spec_padded,
+                spec_lengths,
+                wav_padded,
+                wav_lengths,
+                ids_sorted_decreasing,
+            )
+        return (
+            text_padded,
+            text_lengths,
+            spec_padded,
+            spec_lengths,
+            wav_padded,
+            wav_lengths,
+        )
+
+"""Multi speaker version"""
 
 class TextAudioSpeakerLoader(torch.utils.data.Dataset):
     """
@@ -21,6 +172,7 @@ class TextAudioSpeakerLoader(torch.utils.data.Dataset):
     """
 
     def __init__(self, audiopaths_sid_text, hparams):
+        self.hparams = hparams
         self.audiopaths_sid_text = load_filepaths_and_text(audiopaths_sid_text)
         self.max_wav_value = hparams.max_wav_value
         self.sampling_rate = hparams.sampling_rate
@@ -28,20 +180,10 @@ class TextAudioSpeakerLoader(torch.utils.data.Dataset):
         self.hop_length = hparams.hop_length
         self.win_length = hparams.win_length
         self.sampling_rate = hparams.sampling_rate
-        self.spk_map = hparams.spk2id
-        self.hparams = hparams
-
-        # Add stereo support
-        self.channels = getattr(hparams, "audio_channels", 1)  # Default to mono if not specified
-
-        self.use_mel_spec_posterior = getattr(
-            hparams, "use_mel_posterior_encoder", False
-        )
-        if self.use_mel_spec_posterior:
-            self.n_mel_channels = getattr(hparams, "n_mel_channels", 80)
-        self.cleaned_text = getattr(hparams, "cleaned_text", False)
+        self.n_mel_channels = getattr(hparams, "n_mel_channels", 128)
         self.min_text_len = getattr(hparams, "min_text_len", 1)
-        self.max_text_len = getattr(hparams, "max_text_len", 10000)
+        self.max_text_len = getattr(hparams, "max_text_len", 190)
+        self.min_audio_len = getattr(hparams, "min_audio_len", 8192)
 
         random.seed(1234)
         random.shuffle(self.audiopaths_sid_text)
@@ -52,146 +194,68 @@ class TextAudioSpeakerLoader(torch.utils.data.Dataset):
         Filter text & store spec lengths
         """
         # Store spectrogram lengths for Bucketing
-        # wav_length ~= file_size / (wav_channels * Bytes per dim) = file_size / (channels * 2)
+        # wav_length ~= file_size / (wav_channels * Bytes per dim) = file_size / (1 * 2)
+        # spec_length = wav_length // hop_length
 
         audiopaths_sid_text_new = []
         lengths = []
-        skipped = 0
-        logger.info("Init dataset...")
-        for item in tqdm(
-            self.audiopaths_sid_text
-        ):
-            try:
-                _id, spk, text = item
-            except:
-                print(item)
-                raise
-            audiopath = f"{_id}"
-            if True:
-                audiopaths_sid_text_new.append(
-                    [audiopath, spk, text]
-                )
-                # Adjust for stereo audio (2 channels)
-                lengths.append(os.path.getsize(audiopath) // (2 * self.channels * self.hop_length))
-            else:
-                skipped += 1
-        logger.info(f'min: {min(lengths)}; max: {max(lengths)}' )
-        logger.info(
-            "skipped: "
-            + str(skipped)
-            + ", total: "
-            + str(len(self.audiopaths_sid_text))
-        )
+        for audiopath, sid, text in self.audiopaths_sid_text:
+            if not os.path.isfile(audiopath):
+                continue
+            if self.min_text_len <= len(text) and len(text) <= self.max_text_len:
+                audiopaths_sid_text_new.append([audiopath, sid, text])
+                length = os.path.getsize(audiopath) // (2 * self.hop_length)
+                if length < self.min_audio_len // self.hop_length:
+                    continue
+                lengths.append(length)
         self.audiopaths_sid_text = audiopaths_sid_text_new
         self.lengths = lengths
+        print(
+            len(self.lengths)
+        )  # if we use large corpus dataset, we can check how much time it takes.
 
     def get_audio_text_speaker_pair(self, audiopath_sid_text):
         # separate filename, speaker_id and text
-        audiopath, sid, text = audiopath_sid_text
-        # automatically detect device: cuda, mps, cpu
-        device = "cuda" if torch.cuda.is_available() else "mps" if hasattr(torch.backends, "mps") and torch.backends.mps.is_available() else "cpu"
-        phones, llama_emb = clean_text(text, device=device)
-
-        # Convert text characters to phone IDs
-        phone_ids = cleaned_text_to_sequence(phones)
-
-        # Convert sequences to tensors
-        phones = torch.LongTensor(phone_ids)
-
+        audiopath, sid, text = (
+            audiopath_sid_text[0],
+            audiopath_sid_text[1],
+            audiopath_sid_text[2],
+        )
+        text = get_text(text)
         spec, wav = self.get_audio(audiopath)
-        sid = int(self.spk_map[sid])
-        sid = torch.LongTensor([sid])
-
-        return (phones, spec, wav, sid, llama_emb)
+        sid = self.get_sid(sid)
+        return (text, spec, wav, sid)
 
     def get_audio(self, filename):
-        audio_norm, sampling_rate = load_wav_to_torch(filename, self.sampling_rate)
+        # TODO : if linear spec exists convert to mel from existing linear spec
+        audio, sampling_rate = load_wav_to_torch(filename)
         if sampling_rate != self.sampling_rate:
             raise ValueError(
                 "{} {} SR doesn't match target {} SR".format(
-                    filename, sampling_rate, self.sampling_rate
+                    sampling_rate, self.sampling_rate
                 )
             )
-
-        # Handle stereo audio
-        if audio_norm.dim() == 2 and self.channels == 2:
-            # Already stereo, shape: [channels, time]
-            audio_norm = audio_norm
-        elif audio_norm.dim() == 1 and self.channels == 2:
-            # Convert mono to stereo by duplicating
-            audio_norm = audio_norm.unsqueeze(0).repeat(2, 1)
-        elif audio_norm.dim() == 2 and self.channels == 1:
-            # Convert stereo to mono by averaging
-            audio_norm = audio_norm.mean(dim=0, keepdim=True)
-        else:
-            # Mono audio, add channel dimension
-            audio_norm = audio_norm.unsqueeze(0)
-
-        spec_filename = filename.replace(".wav", f".{self.channels}ch.spec.pt")
-        if self.use_mel_spec_posterior:
-            spec_filename = spec_filename.replace(".spec.pt", ".mel.pt")
-        try:
+        audio_norm = audio / self.max_wav_value
+        audio_norm = audio_norm.unsqueeze(0)
+        spec_filename = filename.replace(".wav", ".spec.pt")
+        spec_filename = spec_filename.replace(".spec.pt", ".mel.pt")
+        if os.path.exists(spec_filename):
             spec = torch.load(spec_filename)
-        except:
-            if self.use_mel_spec_posterior:
-                spec = mel_spectrogram_torch(
-                    audio_norm,
-                    self.filter_length,
-                    self.n_mel_channels,
-                    self.sampling_rate,
-                    self.hop_length,
-                    self.win_length,
-                    self.hparams.mel_fmin,
-                    self.hparams.mel_fmax,
-                    center=False,
-                )
-            else:
-                spec = spectrogram_torch(
-                    audio_norm,
-                    self.filter_length,
-                    self.sampling_rate,
-                    self.hop_length,
-                    self.win_length,
-                    center=False,
-                )
-            # For stereo, spec shape will be [channels, freq, time]
-            # For mono, spec shape will be [freq, time]
-            if self.channels == 1:
-                spec = torch.squeeze(spec, 0)
+        else:
+            spec = mel_spectrogram_torch(
+                audio_norm,
+                self.filter_length,
+                self.n_mel_channels,
+                self.sampling_rate,
+                self.hop_length,
+                self.win_length,
+                self.hparams.mel_fmin,
+                self.hparams.mel_fmax,
+                center=False,
+            )
+            spec = torch.squeeze(spec, 0)
             torch.save(spec, spec_filename)
         return spec, audio_norm
-
-    def get_text(self, text, phone, wav_path):
-        phone = cleaned_text_to_sequence(phone)
-
-        # Use Llama embeddings instead of BERT
-        llama_path = wav_path.replace(".wav", ".llama.pt")
-        try:
-            llama_emb = torch.load(llama_path)
-            assert llama_emb.shape[-1] == len(phone)
-        except Exception as e:
-            print(f"Generating new Llama embedding for {wav_path}: {e}")
-            llama_emb = get_llama_feature(text)
-
-            # Handle potential size mismatch between text and embeddings
-            if llama_emb.shape[-1] != len(phone):
-                # Resize embedding to match phone length
-                orig_len = llama_emb.shape[-1]
-                target_len = len(phone)
-                if orig_len > target_len:
-                    # Truncate
-                    llama_emb = llama_emb[:, :target_len]
-                else:
-                    # Pad with zeros
-                    padding = torch.zeros(llama_emb.shape[0], target_len - orig_len)
-                    llama_emb = torch.cat([llama_emb, padding], dim=1)
-
-            torch.save(llama_emb, llama_path)
-
-        assert llama_emb.shape[-1] == len(phone), f"Llama embedding shape {llama_emb.shape} doesn't match phone length {len(phone)}"
-
-        phone = torch.LongTensor(phone)
-        return llama_emb, phone
 
     def get_sid(self, sid):
         sid = torch.LongTensor([int(sid)])
@@ -202,12 +266,6 @@ class TextAudioSpeakerLoader(torch.utils.data.Dataset):
 
     def __len__(self):
         return len(self.audiopaths_sid_text)
-
-    def shuffle_mapping(self):
-        """
-        Shuffles the dataset for each epoch to ensure different batching
-        """
-        random.shuffle(self.audiopaths_sid_text)
 
 class TextAudioSpeakerCollate:
     """Zero-pads model inputs and targets"""
@@ -223,12 +281,12 @@ class TextAudioSpeakerCollate:
         """
         # Right zero-pad all one-hot text sequences to max input length
         _, ids_sorted_decreasing = torch.sort(
-            torch.LongTensor([x[1].size(-1) for x in batch]), dim=0, descending=True
+            torch.LongTensor([x[1].size(1) for x in batch]), dim=0, descending=True
         )
 
         max_text_len = max([len(x[0]) for x in batch])
-        max_spec_len = max([x[1].size(-1) for x in batch])
-        max_wav_len = max([x[2].size(-1) for x in batch])
+        max_spec_len = max([x[1].size(1) for x in batch])
+        max_wav_len = max([x[2].size(1) for x in batch])
 
         text_lengths = torch.LongTensor(len(batch))
         spec_lengths = torch.LongTensor(len(batch))
@@ -236,32 +294,11 @@ class TextAudioSpeakerCollate:
         sid = torch.LongTensor(len(batch))
 
         text_padded = torch.LongTensor(len(batch), max_text_len)
-
-        # Check if we have stereo or mono spectrograms
-        is_stereo_spec = batch[0][1].dim() == 3
-        is_stereo_wav = batch[0][2].size(0) > 1
-
-        if is_stereo_spec:
-            channels_spec = batch[0][1].size(0)
-            spec_padded = torch.FloatTensor(len(batch), channels_spec, batch[0][1].size(1), max_spec_len)
-        else:
-            spec_padded = torch.FloatTensor(len(batch), batch[0][1].size(0), max_spec_len)
-
-        if is_stereo_wav:
-            channels_wav = batch[0][2].size(0)
-            wav_padded = torch.FloatTensor(len(batch), channels_wav, max_wav_len)
-        else:
-            wav_padded = torch.FloatTensor(len(batch), 1, max_wav_len)
-
-        # Get Llama embedding size
-        llama_dim = batch[0][4].size(0)
-        llama_padded = torch.FloatTensor(len(batch), llama_dim, max_text_len)
-
+        spec_padded = torch.FloatTensor(len(batch), batch[0][1].size(0), max_spec_len)
+        wav_padded = torch.FloatTensor(len(batch), 1, max_wav_len)
         text_padded.zero_()
         spec_padded.zero_()
         wav_padded.zero_()
-        llama_padded.zero_()
-
         for i in range(len(ids_sorted_decreasing)):
             row = batch[ids_sorted_decreasing[i]]
 
@@ -270,26 +307,26 @@ class TextAudioSpeakerCollate:
             text_lengths[i] = text.size(0)
 
             spec = row[1]
-            if is_stereo_spec:
-                spec_padded[i, :, :, : spec.size(2)] = spec
-                spec_lengths[i] = spec.size(2)
-            else:
-                spec_padded[i, :, : spec.size(1)] = spec
-                spec_lengths[i] = spec.size(1)
+            spec_padded[i, :, : spec.size(1)] = spec
+            spec_lengths[i] = spec.size(1)
 
             wav = row[2]
-            if is_stereo_wav:
-                wav_padded[i, :, : wav.size(1)] = wav
-                wav_lengths[i] = wav.size(1)
-            else:
-                wav_padded[i, :, : wav.size(1)] = wav
-                wav_lengths[i] = wav.size(1)
+            wav_padded[i, :, : wav.size(1)] = wav
+            wav_lengths[i] = wav.size(1)
 
             sid[i] = row[3]
-            # Get Llama embedding (fix: use correct index 4 instead of 6)
-            llama = row[4]
-            llama_padded[i, :, : llama.size(1)] = llama
 
+        if self.return_ids:
+            return (
+                text_padded,
+                text_lengths,
+                spec_padded,
+                spec_lengths,
+                wav_padded,
+                wav_lengths,
+                sid,
+                ids_sorted_decreasing,
+            )
         return (
             text_padded,
             text_lengths,
@@ -298,7 +335,6 @@ class TextAudioSpeakerCollate:
             wav_padded,
             wav_lengths,
             sid,
-            llama_padded,
         )
 
 class DistributedBucketSampler(torch.utils.data.distributed.DistributedSampler):
@@ -308,6 +344,7 @@ class DistributedBucketSampler(torch.utils.data.distributed.DistributedSampler):
     Ex) boundaries = [b1, b2, b3] -> any batch is included either {x | b1 < length(x) <=b2} or {x | b2 < length(x) <= b3}.
 
     It removes samples which are not included in the boundaries.
+    Ex) boundaries = [b1, b2, b3] -> any x s.t. length(x) <= b1 or length(x) > b3 are discarded.
     """
 
     def __init__(

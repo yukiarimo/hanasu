@@ -11,8 +11,8 @@ def get_padding(kernel_size, dilation=1):
     return int((kernel_size * dilation - dilation) / 2)
 
 def convert_pad_shape(pad_shape):
-    layer = pad_shape[::-1]
-    pad_shape = [item for sublist in layer for item in sublist]
+    l = pad_shape[::-1]
+    pad_shape = [item for sublist in l for item in sublist]
     return pad_shape
 
 def intersperse(lst, item):
@@ -93,8 +93,8 @@ def fused_add_tanh_sigmoid_multiply(input_a, input_b, n_channels):
     return acts
 
 def convert_pad_shape(pad_shape):
-    layer = pad_shape[::-1]
-    pad_shape = [item for sublist in layer for item in sublist]
+    l = pad_shape[::-1]
+    pad_shape = [item for sublist in l for item in sublist]
     return pad_shape
 
 def shift_1d(x):
@@ -112,6 +112,7 @@ def generate_path(duration, mask):
     duration: [b, 1, t_x]
     mask: [b, 1, t_y, t_x]
     """
+    device = duration.device
 
     b, _, t_y, t_x = mask.shape
     cum_duration = torch.cumsum(duration, -1)
