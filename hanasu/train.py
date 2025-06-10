@@ -8,10 +8,10 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.cuda.amp import autocast, GradScaler
 import tqdm
-import commons
-import utils
-from data_utils import TextAudioLoader, TextAudioCollate, DistributedBucketSampler
-from models import (
+from . import commons
+from . import utils
+from .data_utils import TextAudioLoader, TextAudioCollate, DistributedBucketSampler
+from .models import (
     SynthesizerTrn,
     MultiPeriodDiscriminator,
     DurationDiscriminatorV1,
@@ -19,9 +19,9 @@ from models import (
     AVAILABLE_FLOW_TYPES,
     AVAILABLE_DURATION_DISCRIMINATOR_TYPES
 )
-from losses import generator_loss, discriminator_loss, feature_loss, kl_loss
-from mel_processing import mel_spectrogram_torch, spec_to_mel_torch
-from text import symbols
+from .losses import generator_loss, discriminator_loss, feature_loss, kl_loss
+from .mel_processing import mel_spectrogram_torch, spec_to_mel_torch
+from .text import symbols
 torch.backends.cudnn.benchmark = True
 global_step = 0
 

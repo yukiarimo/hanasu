@@ -3,8 +3,8 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 from torch.nn.utils import remove_weight_norm, weight_norm
-import commons
-from modules import LayerNorm
+from . import commons
+from .modules import LayerNorm
 
 class Encoder(nn.Module):  # backward compatible vits2 encoder
     def __init__(

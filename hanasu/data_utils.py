@@ -2,9 +2,9 @@ import os
 import random
 import torch
 import torch.utils.data
-from mel_processing import (mel_spectrogram_torch)
-from text import text_to_sequence
-from utils import load_filepaths_and_text, load_wav_to_torch
+from .mel_processing import (mel_spectrogram_torch)
+from .text import text_to_sequence
+from .utils import load_filepaths_and_text, load_wav_to_torch
 
 def get_text(text):
     text_norm = text_to_sequence(text)

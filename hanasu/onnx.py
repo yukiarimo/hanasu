@@ -1,13 +1,13 @@
 import torch
 from pathlib import Path
 from typing import Optional
-import utils
-from models import SynthesizerTrn
-from text import symbols
+from . import utils
+from .models import SynthesizerTrn
+from .text import symbols
 import numpy as np
 import onnxruntime
 from scipy.io.wavfile import write
-from data_utils import get_text
+from .data_utils import get_text
 
 def export_onnx(model_path: str, config_path: str, output: str) -> None:
     """

@@ -4,9 +4,9 @@ from torch import nn
 from torch.nn import functional as F
 from torch.nn import Conv1d
 from torch.nn.utils import weight_norm, remove_weight_norm
-import commons
-from commons import init_weights, get_padding
-from transforms import piecewise_rational_quadratic_transform
+from . import commons
+from .commons import init_weights, get_padding
+from .transforms import piecewise_rational_quadratic_transform
 LRELU_SLOPE = 0.1
 
 class LayerNorm(nn.Module):

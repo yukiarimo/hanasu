@@ -7,14 +7,14 @@ from torch import nn
 from torch.nn import Conv1d, Conv2d, ConvTranspose1d
 from torch.nn import functional as F
 from torch.nn.utils import remove_weight_norm, spectral_norm, weight_norm
-import attentions
-import commons
-import modules
-import monotonic_align
-from commons import get_padding, init_weights
-import utils
-from text import symbols
-from data_utils import get_text
+from . import attentions
+from . import commons
+from . import modules
+from . import monotonic_align
+from .commons import get_padding, init_weights
+from . import utils
+from .text import symbols
+from .data_utils import get_text
 import numpy as np
 
 AVAILABLE_FLOW_TYPES = [

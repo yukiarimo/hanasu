@@ -1,6 +1,6 @@
 import re
 from phonemizer.backend import EspeakBackend
-from utils import load_filepaths_and_text
+from .utils import load_filepaths_and_text
 backend = EspeakBackend("en-us", preserve_punctuation=True, with_stress=True, words_mismatch="warn")
 
 _pad = "_"
