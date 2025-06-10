@@ -1394,9 +1394,10 @@ def _split_sentences(text):
     
     return result
 
-def inference(model_path=None, text=None, config_path="./configs/config.json", noise_scale=0.2, noise_scale_w=1.0, length_scale=1.0, device="mps", stream=False):
+def load_model(config_path, model_path, device="mps"):
+    """Load the model from the specified path."""
     hps = utils.get_hparams_from_file(config_path)
-
+    
     net_g = SynthesizerTrn(
         len(symbols),
         128,
@@ -1406,6 +1407,9 @@ def inference(model_path=None, text=None, config_path="./configs/config.json", n
     _ = net_g.eval()
     _ = utils.load_checkpoint(model_path, net_g, None)
 
+    return net_g, hps
+
+def inference(model=None, text=None, noise_scale=0.2, noise_scale_w=1.0, length_scale=1.0, device="mps", stream=False):
     # Split text into sentences
     sentences = _split_sentences(text)
     print(f"Split into {len(sentences)} sentences")
@@ -1421,7 +1425,7 @@ def inference(model_path=None, text=None, config_path="./configs/config.json", n
                 x_tst = stn_tst.to(device).unsqueeze(0)
                 x_tst_lengths = torch.LongTensor([stn_tst.size(0)]).to(device)
                 audio_chunk = (
-                    net_g.infer(
+                    model.infer(
                         x_tst, x_tst_lengths, 
                         noise_scale=noise_scale, 
                         noise_scale_w=noise_scale_w, 
@@ -1453,7 +1457,7 @@ def inference(model_path=None, text=None, config_path="./configs/config.json", n
                             x_tst = stn_tst.to(device).unsqueeze(0)
                             x_tst_lengths = torch.LongTensor([stn_tst.size(0)]).to(device)
                             audio_chunk = (
-                                net_g.infer(
+                                model.infer(
                                     x_tst, x_tst_lengths, 
                                     noise_scale=noise_scale, 
                                     noise_scale_w=noise_scale_w, 
