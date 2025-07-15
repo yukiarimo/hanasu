@@ -150,6 +150,8 @@ class WN(torch.nn.Module):
                 gin_channels, 2 * hidden_channels * n_layers, 1
             )
             self.cond_layer = torch.nn.utils.weight_norm(cond_layer, name="weight")
+        else:
+            self.cond_layer = None
 
         for i in range(n_layers):
             dilation = dilation_rate**i
@@ -178,8 +180,10 @@ class WN(torch.nn.Module):
         output = torch.zeros_like(x)
         n_channels_tensor = torch.IntTensor([self.hidden_channels])
 
-        if g is not None:
+        if g is not None and self.cond_layer is not None:
             g = self.cond_layer(g)
+        elif g is not None and self.cond_layer is None:
+            g = None
 
         for i in range(self.n_layers):
             x_in = self.in_layers[i](x)
@@ -202,12 +206,12 @@ class WN(torch.nn.Module):
         return output * x_mask
 
     def remove_weight_norm(self):
-        if self.gin_channels != 0:
-            torch.nn.utils.remove_weight_norm(self.cond_layer)
         for l in self.in_layers:
-            torch.nn.utils.remove_weight_norm(l)
+            remove_weight_norm(l)
         for l in self.res_skip_layers:
-            torch.nn.utils.remove_weight_norm(l)
+            remove_weight_norm(l)
+        if self.cond_layer is not None:
+            remove_weight_norm(self.cond_layer)
 
 class ResBlock1(torch.nn.Module):
     def __init__(self, channels, kernel_size=3, dilation=(1, 3, 5)):

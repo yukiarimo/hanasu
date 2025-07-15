@@ -28,25 +28,27 @@ def load_checkpoint(checkpoint_path, model, optimizer=None):
     new_state_dict = {}
     for k, v in state_dict.items():
         try:
-            new_state_dict[k] = saved_state_dict[k]
+            if k in saved_state_dict:
+                if saved_state_dict[k].shape == v.shape:
+                    new_state_dict[k] = saved_state_dict[k]
+                else:
+                    print("NOTICE: Size mismatch for %s. Expected %s, got %s. Using model initialization." % (k, v.shape, saved_state_dict[k].shape))
+                    new_state_dict[k] = v
+            else:
+                print("%s is not in the checkpoint" % k)
+                new_state_dict[k] = v
         except:
-            logger.info("%s is not in the checkpoint" % k)
+            print("%s is not in the checkpoint" % k)
             new_state_dict[k] = v
     if hasattr(model, "module"):
         model.module.load_state_dict(new_state_dict)
     else:
         model.load_state_dict(new_state_dict)
-    logger.info(
-        "Loaded checkpoint '{}' (iteration {})".format(checkpoint_path, iteration)
-    )
+    print("Loaded checkpoint '{}' (iteration {})".format(checkpoint_path, iteration))
     return model, optimizer, learning_rate, iteration
 
 def save_checkpoint(model, optimizer, learning_rate, iteration, checkpoint_path):
-    logger.info(
-        "Saving model and optimizer state at iteration {} to {}".format(
-            iteration, checkpoint_path
-        )
-    )
+    print("Saving model and optimizer state at iteration {} to {}".format(iteration, checkpoint_path))
     if hasattr(model, "module"):
         state_dict = model.module.state_dict()
     else:

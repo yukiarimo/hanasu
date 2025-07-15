@@ -1,13 +1,13 @@
 import torch
 from pathlib import Path
 from typing import Optional
-from . import utils
-from .models import SynthesizerTrn
-from .text import symbols
+from hanasu import commons, utils
+from hanasu.models import load_model
+from hanasu.text import symbols
 import numpy as np
 import onnxruntime
 from scipy.io.wavfile import write
-from .data_utils import get_text
+from hanasu.data_utils import get_text
 
 def export_onnx(model_path: str, config_path: str, output: str) -> None:
     """
@@ -25,33 +25,36 @@ def export_onnx(model_path: str, config_path: str, output: str) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
 
     hps = utils.get_hparams_from_file(config_path)
-    posterior_channels = 128
-
-    model_g = SynthesizerTrn(
-        len(symbols),
-        posterior_channels,
-        hps.train.segment_size // hps.data.hop_length,
-        n_speakers=hps.data.n_speakers,
-        **hps.model,
-    )
-
-    _ = model_g.eval()
-    _ = utils.load_checkpoint(model_path, model_g, None)
+    model_g = load_model(config_path, model_path, 'cpu')
 
     def infer_forward(text, text_lengths, scales, sid=None):
         noise_scale = scales[0]
         length_scale = scales[1]
         noise_scale_w = scales[2]
-        audio = model_g.infer(
-            text,
-            text_lengths,
-            noise_scale=noise_scale,
-            length_scale=length_scale,
-            noise_scale_w=noise_scale_w,
-            sid=sid,
-        )[0]
 
-        return audio
+        # Replicating SynthesizerTrn.infer logic without autocast
+        if model_g.n_speakers > 0:
+            g = model_g.emb_g(sid).unsqueeze(-1)
+        else:
+            g = None
+
+        x, m_p, logs_p, x_mask = model_g.enc_p(text, text_lengths, g=g)
+        logw = model_g.dp(x, x_mask, g=g, reverse=True, noise_scale=noise_scale_w)
+        w = torch.exp(logw) * x_mask * length_scale
+        w = torch.clamp(w, min=0.1)
+        w_ceil = torch.ceil(w)
+        y_lengths = torch.clamp_min(torch.sum(w_ceil, [1, 2]), 1).long()
+        y_mask = torch.unsqueeze(commons.sequence_mask(y_lengths, None), 1).to(x_mask.dtype)
+        attn_mask = torch.unsqueeze(x_mask, 2) * torch.unsqueeze(y_mask, -1)
+        attn = commons.generate_path(w_ceil, attn_mask)
+        m_p = torch.matmul(attn.squeeze(1), m_p.transpose(1, 2)).transpose(1, 2)
+        logs_p = torch.matmul(attn.squeeze(1), logs_p.transpose(1, 2)).transpose(1, 2)
+        noise = torch.randn_like(m_p)
+        z_p = m_p + noise * torch.exp(logs_p) * noise_scale
+        z = model_g.flow(z_p, y_mask, g=g, reverse=True)
+        z_masked = z * y_mask
+        o = model_g.dec(z_masked, g=g)
+        return o
 
     model_g.forward = infer_forward
 
@@ -99,7 +102,7 @@ def synthesize(
     model = onnxruntime.InferenceSession(str(model_path), sess_options=sess_options, providers=["CPUExecutionProvider"])
     hps = utils.get_hparams_from_file(config_path)
 
-    phoneme_ids = get_text(text, hps)
+    phoneme_ids = get_text(text)
     text = np.expand_dims(np.array(phoneme_ids, dtype=np.int64), 0)
     text_lengths = np.array([text.shape[1]], dtype=np.int64)
 

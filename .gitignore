@@ -7,3 +7,4 @@ build/
 hanasu/configs/Yuna/*
 hanasu/monotonic_align/core.c
 hanasu/monotonic_align/monotonic_align/core.cpython-310-darwin.so
+tests

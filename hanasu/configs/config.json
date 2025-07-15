@@ -21,19 +21,18 @@
     "validation_files": "/content/Yuna/metadata val.list.cleaned",
     "max_wav_value": 32768.0,
     "sampling_rate": 48000,
-    "filter_length": 2048,
+    "filter_length": 1024,
     "hop_length": 256,
-    "win_length": 2048,
+    "win_length": 1024,
     "n_mel_channels": 128,
     "mel_fmin": 0.0,
     "mel_fmax": null,
-    "n_speakers": 0
+    "n_speakers": 4
   },
   "model": {
     "use_transformer_flows": true,
     "transformer_flow_type": "pre_conv",
-    "use_spk_conditioned_encoder": false,
-    "use_noise_scaled_mas": true,
+    "use_spk_conditioned_encoder": true,
     "inter_channels": 192,
     "hidden_channels": 192,
     "filter_channels": 768,
@@ -48,7 +47,6 @@
     "upsample_initial_channel": 512,
     "upsample_kernel_sizes": [16, 16, 4, 4],
     "n_layers_q": 3,
-    "use_spectral_norm": false,
-    "duration_discriminator_type": "dur_disc_2"
+    "gin_channels": 256
   }
 }

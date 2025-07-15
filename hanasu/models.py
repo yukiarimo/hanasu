@@ -6,7 +6,7 @@ import torch
 from torch import nn
 from torch.nn import Conv1d, Conv2d, ConvTranspose1d
 from torch.nn import functional as F
-from torch.nn.utils import remove_weight_norm, spectral_norm, weight_norm
+from torch.nn.utils import remove_weight_norm, weight_norm
 from . import attentions
 from . import commons
 from . import modules
@@ -16,6 +16,12 @@ from . import utils
 from .text import symbols
 from .data_utils import get_text
 import numpy as np
+from tqdm import tqdm
+import soundfile as sf
+import tempfile
+import os
+from .mel_processing import mel_spectrogram_torch
+from .utils import load_wav_to_torch
 
 AVAILABLE_FLOW_TYPES = [
     "pre_conv",
@@ -23,11 +29,6 @@ AVAILABLE_FLOW_TYPES = [
     "fft",
     "mono_layer_inter_residual",
     "mono_layer_post_residual",
-]
-
-AVAILABLE_DURATION_DISCRIMINATOR_TYPES = [
-    "dur_disc_1",
-    "dur_disc_2",
 ]
 
 class StochasticDurationPredictor(nn.Module):
@@ -966,11 +967,10 @@ class Generator(torch.nn.Module):
             l.remove_weight_norm()
 
 class DiscriminatorP(torch.nn.Module):
-    def __init__(self, period, kernel_size=5, stride=3, use_spectral_norm=False):
+    def __init__(self, period, kernel_size=5, stride=3):
         super(DiscriminatorP, self).__init__()
         self.period = period
-        self.use_spectral_norm = use_spectral_norm
-        norm_f = weight_norm if use_spectral_norm == False else spectral_norm
+        norm_f = weight_norm
         self.convs = nn.ModuleList(
             [
                 norm_f(
@@ -1044,9 +1044,9 @@ class DiscriminatorP(torch.nn.Module):
         return x, fmap
 
 class DiscriminatorS(torch.nn.Module):
-    def __init__(self, use_spectral_norm=False):
+    def __init__(self):
         super(DiscriminatorS, self).__init__()
-        norm_f = weight_norm if use_spectral_norm == False else spectral_norm
+        norm_f = weight_norm
         self.convs = nn.ModuleList(
             [
                 norm_f(Conv1d(1, 16, 15, 1, padding=7)),
@@ -1073,13 +1073,13 @@ class DiscriminatorS(torch.nn.Module):
         return x, fmap
 
 class MultiPeriodDiscriminator(torch.nn.Module):
-    def __init__(self, use_spectral_norm=False):
+    def __init__(self):
         super(MultiPeriodDiscriminator, self).__init__()
         periods = [2, 3, 5, 7, 11]
 
-        discs = [DiscriminatorS(use_spectral_norm=use_spectral_norm)]
+        discs = [DiscriminatorS()]
         discs = discs + [
-            DiscriminatorP(i, use_spectral_norm=use_spectral_norm) for i in periods
+            DiscriminatorP(i) for i in periods
         ]
         self.discriminators = nn.ModuleList(discs)
 
@@ -1157,7 +1157,6 @@ class SynthesizerTrn(nn.Module):
                 self.transformer_flow_type in AVAILABLE_FLOW_TYPES
             ), f"transformer_flow_type must be one of {AVAILABLE_FLOW_TYPES}"
         self.use_sdp = use_sdp
-        self.use_noise_scaled_mas = kwargs.get("use_noise_scaled_mas", False)
         self.mas_noise_scale_initial = kwargs.get("mas_noise_scale_initial", 0.01)
         self.noise_scale_delta = kwargs.get("noise_scale_delta", 2e-6)
 
@@ -1247,13 +1246,12 @@ class SynthesizerTrn(nn.Module):
             )  # [b, 1, t_s]
             neg_cent = neg_cent1 + neg_cent2 + neg_cent3 + neg_cent4
 
-            if self.use_noise_scaled_mas:
-                epsilon = (
-                    torch.std(neg_cent)
-                    * torch.randn_like(neg_cent)
-                    * self.current_mas_noise_scale
-                )
-                neg_cent = neg_cent + epsilon
+            epsilon = (
+                torch.std(neg_cent)
+                * torch.randn_like(neg_cent)
+                * self.current_mas_noise_scale
+            )
+            neg_cent = neg_cent + epsilon
 
             attn_mask = torch.unsqueeze(x_mask, 2) * torch.unsqueeze(y_mask, -1)
             attn = (
@@ -1302,84 +1300,126 @@ class SynthesizerTrn(nn.Module):
         noise_scale=0.2,
         length_scale=1,
         noise_scale_w=1.0,
-        max_len=None,
-        temperature=1.0,  # Temperature scaling for sampling
-        top_k=None,  # Optional top-k sampling
+        temperature=1.0,
     ):
-        if self.n_speakers > 0:
-            g = self.emb_g(sid).unsqueeze(-1)  # [b, h, 1]
-        else:
-            g = None
+        with torch.autocast(device_type=x.device.type):
+            sid = torch.LongTensor([sid]).to(x.device) if sid is not None else None
 
-        x, m_p, logs_p, x_mask = self.enc_p(x, x_lengths, g=g)
+            if self.n_speakers > 0:
+                g = self.emb_g(sid).unsqueeze(-1)  # [b, h, 1]
+            else:
+                g = None
 
-        logw = self.dp(x, x_mask, g=g, reverse=True, noise_scale=noise_scale_w)
+            x, m_p, logs_p, x_mask = self.enc_p(x, x_lengths, g=g)
 
-        # Apply temperature scaling to duration prediction
-        if temperature != 1.0:
-            logw = logw / temperature
+            logw = self.dp(x, x_mask, g=g, reverse=True, noise_scale=noise_scale_w)
 
-        w = torch.exp(logw) * x_mask * length_scale
+            # Apply temperature scaling to duration prediction
+            if temperature != 1.0:
+                logw = logw / temperature
 
-        # Smooth duration alignment to reduce artifacts
-        w = torch.clamp(w, min=0.1)  # Prevent zero durations
-        w_ceil = torch.ceil(w)
+            w = torch.exp(logw) * x_mask * length_scale
 
-        y_lengths = torch.clamp_min(torch.sum(w_ceil, [1, 2]), 1).long()
-        y_mask = torch.unsqueeze(commons.sequence_mask(y_lengths, None), 1).to(
-            x_mask.dtype
-        )
-        attn_mask = torch.unsqueeze(x_mask, 2) * torch.unsqueeze(y_mask, -1)
-        attn = commons.generate_path(w_ceil, attn_mask)
+            # Smooth duration alignment to reduce artifacts
+            w = torch.clamp(w, min=0.1)  # Prevent zero durations
+            w_ceil = torch.ceil(w)
 
-        # Expand prior with attention
-        m_p = torch.matmul(attn.squeeze(1), m_p.transpose(1, 2)).transpose(1, 2)
-        logs_p = torch.matmul(attn.squeeze(1), logs_p.transpose(1, 2)).transpose(1, 2)
+            y_lengths = torch.clamp_min(torch.sum(w_ceil, [1, 2]), 1).long()
+            y_mask = torch.unsqueeze(commons.sequence_mask(y_lengths, None), 1).to(
+                x_mask.dtype
+            )
+            attn_mask = torch.unsqueeze(x_mask, 2) * torch.unsqueeze(y_mask, -1)
+            attn = commons.generate_path(w_ceil, attn_mask)
 
-        # Apply temperature scaling and optional top-k sampling
-        if temperature != 1.0:
-            logs_p = logs_p / temperature
+            # Expand prior with attention
+            m_p = torch.matmul(attn.squeeze(1), m_p.transpose(1, 2)).transpose(1, 2)
+            logs_p = torch.matmul(attn.squeeze(1), logs_p.transpose(1, 2)).transpose(1, 2)
 
-        # Generate noise
-        noise = torch.randn_like(m_p)
+            # Apply temperature scaling and optional top-k sampling
+            if temperature != 1.0:
+                logs_p = logs_p / temperature
 
-        # Optional top-k sampling for more controlled randomness
-        if top_k is not None and top_k > 0:
-            # Simple top-k like filtering by clamping extreme values
-            noise = torch.clamp(noise, min=-top_k, max=top_k)
+            # Generate noise
+            noise = torch.randn_like(m_p)
 
-        z_p = m_p + noise * torch.exp(logs_p) * noise_scale
+            z_p = m_p + noise * torch.exp(logs_p) * noise_scale
 
-        # Apply flow transformation
-        z = self.flow(z_p, y_mask, g=g, reverse=True)
+            # Apply flow transformation
+            z = self.flow(z_p, y_mask, g=g, reverse=True)
 
-        # Generate audio with proper masking
-        z_masked = z * y_mask
-        if max_len is not None:
-            z_masked = z_masked[:, :, :max_len]
+            # Generate audio with proper masking
+            z_masked = z * y_mask
 
-        o = self.dec(z_masked, g=g)
+            o = self.dec(z_masked, g=g)
 
         return o, attn, y_mask, (z, z_p, m_p, logs_p)
 
+    def voice_conversion(self, y, y_lengths, sid_src, sid_tgt):
+        assert self.n_speakers > 0, "n_speakers have to be larger than 0."
+        g_src = self.emb_g(sid_src).unsqueeze(-1)
+        g_tgt = self.emb_g(sid_tgt).unsqueeze(-1)
+        z, m_q, logs_q, y_mask = self.enc_q(y, y_lengths, g=g_src)
+        z_p = self.flow(z, y_mask, g=g_src)
+        z_hat = self.flow(z_p, y_mask, g=g_tgt, reverse=True)
+        o_hat = self.dec(z_hat * y_mask, g=g_tgt)
+        return o_hat, y_mask, (z, z_p, z_hat)
+
+    def infer_custom_durations(self, x, x_lengths, sid, durations, noise_scale=0.667):
+        if self.n_speakers > 0:
+            g = self.emb_g(sid).unsqueeze(-1)
+        else:
+            g = None
+
+        # Encoder part
+        x, m_p, logs_p, x_mask = self.enc_p(x, x_lengths, g=g)
+
+        # Use provided durations instead of predicting them
+        # durations should be a tensor of shape [1, 1, t_x]
+        w_ceil = durations.unsqueeze(0).unsqueeze(0).to(x.device)
+
+        if w_ceil.shape[2] != x.shape[2]:
+            print(f"Warning: Mismatch in phoneme count and duration count. Phonemes: {x.shape[2]}, Durations: {w_ceil.shape[2]}")
+            # Truncate or pad durations to match phoneme length
+            if w_ceil.shape[2] > x.shape[2]:
+                w_ceil = w_ceil[:, :, :x.shape[2]]
+            else:
+                padding = torch.zeros((1, 1, x.shape[2] - w_ceil.shape[2]), device=x.device, dtype=w_ceil.dtype)
+                w_ceil = torch.cat([w_ceil, padding], dim=2)
+
+        y_lengths = torch.clamp_min(torch.sum(w_ceil, [1, 2]), 1).long()
+        y_mask = torch.unsqueeze(commons.sequence_mask(y_lengths, None), 1).to(x_mask.dtype)
+        attn_mask = torch.unsqueeze(x_mask, 2) * torch.unsqueeze(y_mask, -1)
+        attn = commons.generate_path(w_ceil, attn_mask)
+
+        # expand prior
+        m_p = torch.matmul(attn.squeeze(1), m_p.transpose(1, 2)).transpose(1, 2)
+        logs_p = torch.matmul(attn.squeeze(1), logs_p.transpose(1, 2)).transpose(1, 2)
+
+        # Posterior part
+        z_p = m_p + torch.randn_like(m_p) * torch.exp(logs_p) * noise_scale
+        z = self.flow(z_p, y_mask, g=g, reverse=True)
+        o = self.dec((z * y_mask), g=g)
+
+        return o
+
 def _split_sentences(text):
-    """Split text into sentences by . ! ? , with basic cleaning"""
+    """Split text into sentences by . ! ? with basic cleaning"""
     # Replace newlines and normalize whitespace
     text = re.sub(r'\n+', ' ', text)
     text = re.sub(r'\s+', ' ', text.strip())
-    
+
     # Replace en-dash, em-dash, hyphens, semicolons, colons with commas
     text = re.sub(r'[–—\-;:]', ',', text)
-    
+
     # Remove parentheses
     text = re.sub(r'[()]', '', text)
-    
+
     # Remove all styles of quotes
     text = re.sub(r'[""''"`]', '', text)
-    
+
     # Split by sentence endings while preserving the punctuation
     sentences = re.split(r'([.!?…])', text)
-    
+
     # Reconstruct sentences with their punctuation
     result = []
     for i in range(0, len(sentences) - 1, 2):
@@ -1387,70 +1427,128 @@ def _split_sentences(text):
         if sentence:  # Only add non-empty sentences
             punctuation = sentences[i + 1] if i + 1 < len(sentences) else ''
             result.append(sentence + punctuation)
-    
+
     # Handle case where text doesn't end with punctuation
     if len(sentences) % 2 == 1 and sentences[-1].strip():
         result.append(sentences[-1].strip())
-    
+
     return result
 
 def load_model(config_path, model_path, device="mps"):
     """Load the model from the specified path."""
     hps = utils.get_hparams_from_file(config_path)
-    
+
     net_g = SynthesizerTrn(
         len(symbols),
         128,
         hps.train.segment_size // hps.data.hop_length,
+        n_speakers=hps.data.n_speakers,
         **hps.model
     ).to(device)
     _ = net_g.eval()
     _ = utils.load_checkpoint(model_path, net_g, None)
 
-    return net_g, hps
+    return net_g
 
-def inference(model=None, text=None, noise_scale=0.2, noise_scale_w=1.0, length_scale=1.0, device="mps", stream=False):
+def inference(model=None, text=None, sid=0, noise_scale=0.2, noise_scale_w=1.0, length_scale=1.0, device="mps", stream=False, output_file=None):
     # Split text into sentences
     sentences = _split_sentences(text)
     print(f"Split into {len(sentences)} sentences")
 
     if not stream:
-        # Non-streaming: generate all sentences and concatenate
-        all_audio = []
-        for i, sentence in enumerate(sentences):
-            print(f"Processing sentence {i+1}/{len(sentences)}: {sentence[:50]}...")
-            stn_tst = get_text(sentence)
+        # Non-streaming: write directly to file if output_file provided, otherwise keep in memory
+        if output_file:
 
-            with torch.no_grad():
-                x_tst = stn_tst.to(device).unsqueeze(0)
-                x_tst_lengths = torch.LongTensor([stn_tst.size(0)]).to(device)
-                audio_chunk = (
-                    model.infer(
-                        x_tst, x_tst_lengths, 
-                        noise_scale=noise_scale, 
-                        noise_scale_w=noise_scale_w, 
-                        length_scale=length_scale
-                    )[0][0, 0]
-                    .data.cpu()
-                    .float()
-                    .numpy()
-                )
-                all_audio.append(audio_chunk)
+            # Create temporary file for writing audio chunks
+            temp_files = []
 
-        # Concatenate all audio chunks
-        audio = np.concatenate(all_audio)
-        return audio
+            try:
+                for i, sentence in enumerate(tqdm(sentences, desc="Generating audio", unit="sentence")):
+                    stn_tst = get_text(sentence)
+
+                    with torch.no_grad():
+                        x_tst = stn_tst.to(device).unsqueeze(0)
+                        x_tst_lengths = torch.LongTensor([stn_tst.size(0)]).to(device)
+                        audio_chunk = (
+                            model.infer(
+                                x_tst, x_tst_lengths,
+                                sid=sid if sid is not None else None,
+                                noise_scale=noise_scale,
+                                noise_scale_w=noise_scale_w,
+                                length_scale=length_scale
+                            )[0][0, 0]
+                            .data.cpu()
+                            .float()
+                            .numpy()
+                        )
+
+                        # Write chunk to temporary file
+                        temp_file = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
+                        temp_files.append(temp_file.name)
+                        sf.write(temp_file.name, audio_chunk, 22050)  # Assuming 22050 sample rate
+                        temp_file.close()
+
+                # Concatenate all temporary files into final output
+                print("Concatenating audio chunks...")
+                all_audio = []
+                for temp_file in temp_files:
+                    chunk_audio, _ = sf.read(temp_file)
+                    all_audio.append(chunk_audio)
+
+                # Write final concatenated audio
+                final_audio = np.concatenate(all_audio)
+                sf.write(output_file, final_audio, 22050)
+
+                # Clean up temporary files
+                for temp_file in temp_files:
+                    os.unlink(temp_file)
+
+                print(f"Audio saved to {output_file}")
+                return final_audio
+
+            except Exception as e:
+                # Clean up temporary files on error
+                for temp_file in temp_files:
+                    if os.path.exists(temp_file):
+                        os.unlink(temp_file)
+                raise e
+        else:
+            # Original memory-based approach when no output file specified
+            all_audio = []
+            for i, sentence in enumerate(tqdm(sentences, desc="Generating audio", unit="sentence")):
+                stn_tst = get_text(sentence)
+
+                with torch.no_grad():
+                    x_tst = stn_tst.to(device).unsqueeze(0)
+                    x_tst_lengths = torch.LongTensor([stn_tst.size(0)]).to(device)
+                    audio_chunk = (
+                        model.infer(
+                            x_tst, x_tst_lengths,
+                            sid=sid if sid is not None else None,
+                            noise_scale=noise_scale,
+                            noise_scale_w=noise_scale_w,
+                            length_scale=length_scale
+                        )[0][0, 0]
+                        .data.cpu()
+                        .float()
+                        .numpy()
+                    )
+                    all_audio.append(audio_chunk)
+
+            # Concatenate all audio chunks
+            audio = np.concatenate(all_audio)
+            return audio
 
     else:
         # Streaming: yield audio chunks with background generation using threading and queue
         def audio_generator():
             audio_queue = queue.Queue(maxsize=2)  # Buffer for 2 chunks
-            
+            pbar = tqdm(total=len(sentences), desc="Generating audio", unit="sentence")
+
             def generate_audio_worker():
                 """Worker thread to generate audio chunks in background"""
                 try:
                     for i, sentence in enumerate(sentences):
-                        print(f"Generating sentence {i+1}/{len(sentences)}: {sentence[:50]}...")
                         stn_tst = get_text(sentence)
 
                         with torch.no_grad():
@@ -1458,9 +1556,10 @@ def inference(model=None, text=None, noise_scale=0.2, noise_scale_w=1.0, length_
                             x_tst_lengths = torch.LongTensor([stn_tst.size(0)]).to(device)
                             audio_chunk = (
                                 model.infer(
-                                    x_tst, x_tst_lengths, 
-                                    noise_scale=noise_scale, 
-                                    noise_scale_w=noise_scale_w, 
+                                    x_tst, x_tst_lengths,
+                                    sid=sid if sid is not None else None,
+                                    noise_scale=noise_scale,
+                                    noise_scale_w=noise_scale_w,
                                     length_scale=length_scale
                                 )[0][0, 0]
                                 .data.cpu()
@@ -1468,24 +1567,24 @@ def inference(model=None, text=None, noise_scale=0.2, noise_scale_w=1.0, length_
                                 .numpy()
                             )
                             audio_queue.put(audio_chunk)
-                            print(f"Queued sentence {i+1}/{len(sentences)}")
+                            pbar.update(1)
                 except Exception as e:
                     print(f"Error in audio generation worker: {e}")
                 finally:
                     # Signal end of generation
                     audio_queue.put(None)
-            
+                    pbar.close()
+
             # Start background generation thread
             worker_thread = threading.Thread(target=generate_audio_worker, daemon=True)
             worker_thread.start()
-            
+
             # Yield audio chunks as they become available
             while True:
                 try:
                     audio_chunk = audio_queue.get(timeout=30)  # 30 second timeout
                     if audio_chunk is None:  # End signal
                         break
-                    print(f"Streaming chunk of {len(audio_chunk)} samples")
                     yield audio_chunk
                 except queue.Empty:
                     print("Timeout waiting for audio chunk")
@@ -1493,8 +1592,76 @@ def inference(model=None, text=None, noise_scale=0.2, noise_scale_w=1.0, length_
                 except Exception as e:
                     print(f"Error in audio streaming: {e}")
                     break
-            
+
             # Ensure worker thread completes
             worker_thread.join(timeout=5)
 
         return audio_generator()
+
+def voice_conversion_inference(model=None, source_wav_path=None, source_speaker_id=0, target_speaker_id=1, device="mps"):
+    """
+    Perform voice conversion from source speaker to target speaker.
+    
+    Args:
+        model: Loaded SynthesizerTrn model
+        source_wav_path: Path to source audio file
+        source_speaker_id: ID of source speaker
+        target_speaker_id: ID of target speaker
+        device: Device to run inference on ("mps", "cuda", "cpu")
+        output_file: Optional path to save output audio file
+        
+    Returns:
+        numpy.ndarray: Converted audio as numpy array
+    """
+    # Get model config
+    hps = model.hps if hasattr(model, 'hps') else None
+    
+    max_wav_value = hps.data.max_wav_value
+    filter_length = hps.data.filter_length
+    hop_length = hps.data.hop_length
+    win_length = hps.data.win_length
+    n_mel_channels = hps.data.n_mel_channels
+    sampling_rate = hps.data.sampling_rate
+    mel_fmin = hps.data.mel_fmin
+    mel_fmax = hps.data.mel_fmax
+
+    # Load and preprocess audio
+    audio, sr = load_wav_to_torch(source_wav_path)
+    
+    # Normalize audio to [-1, 1] range
+    audio_norm = audio / max_wav_value
+    audio_norm = audio_norm.unsqueeze(0)
+    
+    # Convert audio to mel spectrogram
+    mel = mel_spectrogram_torch(
+        audio_norm,
+        filter_length,
+        n_mel_channels,
+        sampling_rate,
+        hop_length,
+        win_length,
+        mel_fmin,
+        mel_fmax,
+        center=False,
+    )
+    
+    # Perform voice conversion
+    with torch.no_grad():
+        y = mel.to(device)
+        y_lengths = torch.LongTensor([y.shape[2]]).to(device)
+        sid_src = torch.LongTensor([source_speaker_id]).to(device)
+        sid_tgt = torch.LongTensor([target_speaker_id]).to(device)
+        
+        print(f"Performing voice conversion from speaker {source_speaker_id} to {target_speaker_id}...")
+        
+        # Call the voice conversion method
+        audio_out, _, _ = model.voice_conversion(
+            y, y_lengths, sid_src=sid_src, sid_tgt=sid_tgt
+        )
+        
+        print("Voice conversion complete.")
+    
+    # Get the audio data, convert to numpy
+    output_audio = audio_out[0, 0].data.cpu().float().numpy()
+
+    return output_audio

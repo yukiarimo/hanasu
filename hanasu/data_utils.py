@@ -8,7 +8,6 @@ from .utils import load_filepaths_and_text, load_wav_to_torch
 
 def get_text(text):
     text_norm = text_to_sequence(text)
-    # else not cleaned text before -> text_norm = text_to_sequence(text)
     text_norm = torch.LongTensor(text_norm)
     return text_norm
 
